@@ -17,6 +17,10 @@
   ([filepath input-map]
    (config/map->Config {:config (config/read-config filepath input-map)})))
 
+(defn new-logger
+  []
+  (logs/map->Logger {}))
+
 (defn new-database []
   (database/map->Database {}))
 
@@ -26,8 +30,6 @@
 (defn new-http-mock
   [responses]
   (http/map->HttpMock {:responses responses}))
-
-(def setup-logger logs/setup)
 
 (defn new-mq
   ([workers blocking?]

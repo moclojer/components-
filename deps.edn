@@ -1,13 +1,14 @@
 {:paths ["resources" "src"]
  :deps  {org.clojure/clojure                   {:mvn/version "1.11.1"}
          com.moclojer/moclojer                 {:mvn/version "0.3.4"}
-         com.moclojer/rq                       {:mvn/version "0.2.1"}
+         com.moclojer/rq                       {:mvn/version "0.2.2"}
          clj-http/clj-http                     {:mvn/version "3.12.3"}
          com.zaxxer/HikariCP                   {:mvn/version "5.0.1"}
          com.stuartsierra/component            {:mvn/version "1.1.0"}
-         com.taoensso/timbre                   {:mvn/version "6.3.1"}
-         viesti/timbre-json-appender           {:mvn/version "0.2.13"}
-         com.fzakaria/slf4j-timbre             {:mvn/version "0.3.21"}
+         org.clojure/core.async                {:mvn/version "1.6.681"}
+         com.taoensso/telemere                 {:mvn/version "1.0.0-beta25"}
+         com.taoensso/slf4j-telemere           {:mvn/version "1.0.0-beta21"}
+         org.clojure/data.json                 {:mvn/version "2.5.0"}
          aero/aero                             {:mvn/version "1.1.6"}
          metosin/muuntaja                      {:mvn/version "0.6.8"}
          metosin/malli                         {:mvn/version "0.11.0"}

@@ -1,62 +1,145 @@
 (ns com.moclojer.components.logs
   (:require
-   [taoensso.timbre :as timbre]
-   [taoensso.timbre.appenders.core :as core-appenders]
-   [timbre-json-appender.core :as tas])
+   [com.stuartsierra.component :as component]
+   [clojure.core.async :as async]
+   [clojure.data.json :as json]
+   [clj-http.client :as http-client]
+   [taoensso.telemere :as t])
   (:import
-   [java.util.logging Filter Handler Logger]))
+   [clojure.core.async.impl.channels ManyToManyChannel]))
 
-(defn clean-dep-logs
-  "clean logs on prod that are not from our application"
-  []
-  (doseq [^Handler handler (.. (Logger/getGlobal)
-                               getParent
-                               getHandlers)]
-    (.setFilter
-     handler
-     (reify Filter
-       (isLoggable [_ record]
-         (if-let [^String logger-name (.getLoggerName record)]
-           (not-any? #(.contains logger-name %)
-                     ["jetty" "hikari" "pedestal" "migratus"])
-           ;; returning false explicitly so Java interop doesn't
-           ;; bugout for some reason in the future.
-           false))))))
+(let [log! (t/handler:console nil)]
+  (defn log-console!
+    "Uses telemere's console logger explicitly
+    so other added handlers don't trigger."
+    [level msg & [data error]]
+    (log! {:level level
+           :data data
+           :error error
+           :msg_ msg})))
 
-(defn clean-timbre-appenders []
-  (->> (reduce-kv
-        (fn [acc k _]
-          (assoc acc k nil))
-        {} (:appenders timbre/*config*))
-       (assoc nil :appenders)
-       timbre/merge-config!))
+(defn ->str-values
+  "Adapts all values (including nested maps' values) from given
+  map `m` to a string.
 
-(defn setup [level stream env]
-  (clean-timbre-appenders)
-  (let [prod? (= env :prod)
-        ns-filter (when prod?
-                    #{"components.*" "back.api.*"
-                      "yaml-generator.*" "cloud-ops.api.*"})
-        appenders (if prod?
-                    (tas/install)
-                    {:appenders
-                     {:println
-                      (core-appenders/println-appender
-                       {:stream stream})}})]
-    (when prod? (clean-dep-logs))
-    (timbre/merge-config!
-     (merge appenders
-            {:min-level level
-             :ns-filter ns-filter}))))
+  This is because OpenSearch only accepts string json values."
+  [v]
+  (cond
+    (map? v) (reduce-kv (fn [m k v] (assoc m k (->str-values v))) {} v)
+    (coll? v) (into (empty v) (map ->str-values v))
+    (string? v) v
+    (nil? v) v
+    :else (str v)))
 
-(defmacro log [level & args]
-  `(timbre/log ~level ~@args))
+(defn signal->opensearch-log
+  "Adapts a telemere signal to a pre-defined schema for OpenSearch."
+  [{:keys [thread location parent root msg_] :as signal}]
+  (-> (select-keys signal [:level :ctx :data :uid :id
+                           :inst :end-inst :run-nsecs])
+      (merge {"msg_" (when-not (delay? msg_) msg_)
+              "thread/group" (:group thread)
+              "thread/name" (:name thread)
+              "thread/id" (:id thread)
+              "parent/uid" (:uid parent)
+              "parent/id" (:id parent)
+              "root/uid" (:uid root)
+              "root/id" (:id root)
+              "location" (str (:ns location) ":"
+                              (:line location) "x"
+                              (:column location))})
+      (->str-values)
+      (assoc :error (:error signal))
+      (json/write-str)))
+
+(defn build-opensearch-base-req
+  [config]
+  (let [{:keys [username password host port index]} config
+        url (str "https://" host ":" port "/_bulk")]
+    {:method :post
+     :url url
+     :basic-auth [username password]
+     :content-type :json
+     :body (json/write-str {:index {:_index index}})}))
+
+(defn send-opensearch-log-req
+  [base-req log]
+  (try
+    (http-client/request
+     (update base-req :body str \newline log \newline))
+    (catch Exception e
+      (log-console! :error "failed to send opensearch log"
+                    {:log log} e))))
+
+;; If on dev `env`, does basically nothing besides setting the min
+;; level. On `prod` env however, an async channel waits for log events,
+;; which are then sent to OpenSearch.
+(defrecord Logger [config]
+  component/Lifecycle
+  (start [this]
+    (let [config (:config config)
+          prod? (= (:env config) :prod)
+          os-cfg (:opensearch config)
+          log-ch (async/chan)
+          os-base-req (build-opensearch-base-req os-cfg)]
+
+      (t/set-min-level!
+       (or (get-in config [:logger :min-level]) :info))
+
+      (when (and prod? (instance? ManyToManyChannel log-ch))
+        (t/set-ns-filter! {:disallow #{"*jetty*" "*hikari*"
+                                       "*pedestal*" "*migratus*"}})
+
+        (t/add-handler!
+         ::opensearch
+         (fn [signal]
+           (async/go
+             (async/>! log-ch (signal->opensearch-log signal)))))
+
+        (async/go
+          (while true
+            (let [[log _] (async/alts! [log-ch])]
+              (send-opensearch-log-req os-base-req log)))))
+
+      (assoc this :log-ch log-ch)))
+  (stop [this]
+    (t/remove-handler! ::opensearch)
+    (update this :log-ch #(when % (async/close! %)))))
+
+(defmacro trace
+  [id data & body]
+  `(taoensso.telemere/trace!
+    {:id ~id
+     :data ~data}
+    (do ~@body)))
+
+(defn log
+  [level msg & [data ctx error]]
+  (t/log! {:level level
+           :ctx ctx
+           :data data
+           :error error}
+          (str msg)))
 
 (defn gen-ctx-with-cid []
   {:cid (str "cid-" (random-uuid) "-" (System/currentTimeMillis))})
 
 (comment
-  (setup [["*" :info]] :auto :prod)
-  (log :info :world)
+  (def logger
+    (map->Logger
+     {:config
+      {:config
+       {:env :prod
+        :opensearch
+        {:username "foobar"
+         :password "foobar"
+         :host "foobar"
+         :port 25060
+         :index "components-test-logs"}}}}))
+
+  (component/start logger)
+  (component/stop logger)
+
+  (trace ::testing-stuff {:testing? :definitely}
+         (log :error "aaaaa aaaa" {:hello true}))
   ;;
   )

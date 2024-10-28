@@ -13,8 +13,7 @@
                :host "0.0.0.0"
                :join? true
                :env env}]
-      (logs/log :info "starting webserver config"
-                :ctx {:env env :port port})
+      (logs/log :info "starting webserver config" {:env env :port port})
       (assoc this :webserver (jetty/run-jetty (:router router) cfg))))
 
   (stop [this]

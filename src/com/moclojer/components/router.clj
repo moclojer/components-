@@ -2,7 +2,6 @@
   (:require
    [clojure.string :as str]
    [com.moclojer.components.logs :as logs]
-   [com.moclojer.components.sentry :as sentry]
    [com.stuartsierra.component :as component]
    [muuntaja.core :as m]
    [reitit.coercion.malli :as reitit.malli]
@@ -15,10 +14,14 @@
    [reitit.swagger :as swagger]
    [reitit.swagger-ui :as swagger-ui]))
 
-(defn send-sentry-evt-from-req! [req ex]
-  (if-let [sentry-cmp (get-in req [:components :sentry])]
-    (sentry/send-event! sentry-cmp {:throwable ex})
-    (logs/log :error "failed to send sentry event (nil component)")))
+(defn send-sentry-evt-from-req! [req data-ex]
+  (let [sentry-cmp (get-in req [:components :sentry])]
+    (try
+      (sentry/send-event! sentry-cmp {:throwable data-ex})
+      (catch Exception sentry-ex
+        (logs/log-console!
+         :error "failed to send sentry event"
+         {:event data-ex} sentry-ex)))))
 
 (defn exception-middleware
   [handler-fn]
